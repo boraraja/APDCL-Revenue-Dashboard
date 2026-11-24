@@ -43,7 +43,18 @@ def _get_config(section, key, env_name=None):
 def get_admin_password():
     return _get_config("admin", "password", "APDCL_ADMIN_PASSWORD")
 
-SUPABASE_URL = _get_config("supabase", "url", "SUPABASE_URL")
+def _normalize_supabase_url(value):
+    """Accept either the project URL or a URL that already ends in /rest/v1."""
+    if not value:
+        return None
+    url = str(value).strip().rstrip("/")
+    for suffix in ("/rest/v1", "/rest"):
+        if url.endswith(suffix):
+            url = url[:-len(suffix)]
+            break
+    return url
+
+SUPABASE_URL = _normalize_supabase_url(_get_config("supabase", "url", "SUPABASE_URL"))
 SUPABASE_KEY = _get_config("supabase", "key", "SUPABASE_KEY")
 USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY)
 
@@ -345,7 +356,7 @@ with st.sidebar:
             pw = st.text_input("Admin password", type="password", key="admin_password_input")
             if st.button("Login", key="admin_login_btn"):
                 if not expected_admin_pw:
-                    st.error("Admin password is not configured. Set it in Streamlit Secrets.")
+                    st.error("Admin password is not configured. Set APDCL_ADMIN_PASSWORD on the server or in Streamlit Secrets.")
                 elif hmac.compare_digest(pw or "", expected_admin_pw):
                     st.session_state[ADMIN_KEY] = True
                     st.rerun()
@@ -603,6 +614,18 @@ def display_quarterly_visuals(full_df, labels, daily_tdc_data, key_suffix, hide_
         draw_chart("TDC", c_ch4, ["#94a3b8", "#64748b", "#334155"])
     st.markdown('</div>', unsafe_allow_html=True)
 
+def _empty_chart(subdivision, message="No data available for this period"):
+    """Always return a valid Figure so plotly_chart never receives None."""
+    fig = go.Figure()
+    fig.update_layout(
+        title=dict(text=subdivision, font=dict(color='#0f172a', size=18, family="Arial Black")),
+        xaxis=dict(visible=False), yaxis=dict(visible=False), height=400,
+        margin=dict(l=0, r=0, t=50, b=0), plot_bgcolor="rgba(0,0,0,0)",
+        annotations=[dict(text=message, xref="paper", yref="paper", x=0.5, y=0.5,
+                          showarrow=False, font=dict(size=16, color="#64748b"))]
+    )
+    return fig
+
 def create_history_chart(df_hist, subdivision, ref_date, df_daily_backup=None, current_df=None):
     t_yoy = ref_date - pd.DateOffset(years=1); t_m2 = ref_date - pd.DateOffset(months=2); t_m1 = ref_date - pd.DateOffset(months=1); t_curr = ref_date
     targets = [t_yoy, t_m2, t_m1, t_curr]; final_rows = []
@@ -633,7 +656,8 @@ def create_history_chart(df_hist, subdivision, ref_date, df_daily_backup=None, c
                  row_data = {'MonthStr': t_date.strftime('%b %y'), 'Demand': r['Demand'], 'Collection': r['Collection'], 'SortDate': t_date, 'Order': i}; found = True
         if row_data: final_rows.append(row_data)
 
-    if not final_rows: return None
+    if not final_rows:
+        return _empty_chart(subdivision, "No history data uploaded for this subdivision")
     df_final = pd.DataFrame(final_rows).sort_values("Order")
     df_final['Achievement %'] = (df_final['Collection'] / df_final['Demand'] * 100).fillna(0)
     df_final['X_Label'] = df_final.apply(lambda x: f"{x['MonthStr']}<br><b>{x['Achievement %']:.1f}%</b>", axis=1)
@@ -657,9 +681,16 @@ def create_history_chart(df_hist, subdivision, ref_date, df_daily_backup=None, c
     return fig
 
 def create_ai_trend_chart(df_daily_hist, current_data_df, subdivision, days_in_month, report_time_obj, selected_date):
-    df_prev = df_daily_hist[df_daily_hist['Sub-Div'] == subdivision].copy()
-    df_curr = current_data_df[current_data_df['Sub-Div'] == subdivision].copy()
-    if df_prev.empty and df_curr.empty: return None
+    if df_daily_hist is None or df_daily_hist.empty:
+        df_prev = pd.DataFrame(columns=['Sub-Div', 'Day', 'Collection', 'Demand'])
+    else:
+        df_prev = df_daily_hist[df_daily_hist['Sub-Div'] == subdivision].copy()
+    if current_data_df is None or current_data_df.empty:
+        df_curr = pd.DataFrame(columns=['Sub-Div', 'Date', 'Collection', 'Demand'])
+    else:
+        df_curr = current_data_df[current_data_df['Sub-Div'] == subdivision].copy()
+    if df_prev.empty and df_curr.empty:
+        return _empty_chart(subdivision, "No daily data uploaded for this subdivision")
     if not df_curr.empty: df_curr = df_curr.sort_values('Date'); df_curr['Day'] = df_curr['Date'].dt.day
     stats_per_day = df_prev.groupby('Day')['Collection'].agg(['min', 'max', 'mean']).reset_index()
     stats_per_day = stats_per_day[stats_per_day['Day'] <= 31]
